@@ -1,0 +1,9 @@
+datasets
+numpy
+pandas
+sentencepiece
+scikit-learn
+torch
+transformers
+tqdm
+wandb
