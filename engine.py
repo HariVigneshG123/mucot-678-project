@@ -1,17 +1,12 @@
-from ast import arg
-from random import choice
-from re import A
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import wandb
-
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, AutoConfig, AutoModelForQuestionAnswering, Trainer, TrainerCallback
-
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Union
 from transformers.trainer_pt_utils import IterableDatasetShard
 from transformers.file_utils import is_sagemaker_mp_enabled, is_apex_available, is_datasets_available
 
@@ -38,23 +33,9 @@ class CustomTrainer(Trainer):
         super(CustomTrainer, self).__init__(model, training_args, **kwargs)
         if self.temperature_for_contrastive < 0:
             self.model.logit_scale = nn.Parameter(torch.ones([], device=self.model.device) * np.log(1 / 0.07))
-            # self.model.logit_scale_qn = nn.Parameter(torch.ones([], device=self.model.device) * np.log(1 / 0.07))
-            # self.model.logit_scale_con = nn.Parameter(torch.ones([], device=self.model.device) * np.log(1 / 0.07))
 
     def training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]]) -> torch.Tensor:
-        """
-        Perform a training step on a batch of inputs.
-        Subclass and override to inject custom behavior.
-        Args:
-            model (`nn.Module`):
-                The model to train.
-            inputs (`Dict[str, Union[torch.Tensor, Any]]`):
-                The inputs and targets of the model.
-                The dictionary will be unpacked before being fed to the model. Most models expect the targets under the
-                argument `labels`. Check your model's documentation for all accepted arguments.
-        Return:
-            `torch.Tensor`: The tensor with training loss on this batch.
-        """
+
         model.train()
         inputs = self._prepare_inputs(inputs)
 
@@ -67,10 +48,9 @@ class CustomTrainer(Trainer):
             loss = self.compute_loss(model, inputs)
 
         if self.args.n_gpu > 1:
-            loss = loss.mean()  # mean() to average on multi-gpu parallel training
+            loss = loss.mean()
 
         if self.args.gradient_accumulation_steps > 1 and not self.deepspeed:
-            # deepspeed handles loss scaling by gradient_accumulation_steps in its `backward`
             loss = loss / self.args.gradient_accumulation_steps
 
         if self.do_grad_scaling:
@@ -79,19 +59,52 @@ class CustomTrainer(Trainer):
             with amp.scale_loss(loss, self.optimizer) as scaled_loss:
                 scaled_loss.backward()
         elif self.deepspeed:
-            # loss gets scaled under gradient_accumulation_steps in deepspeed
             loss = self.deepspeed.backward(loss)
         else:
             loss.backward()
 
         return loss.detach()
 
+    def get_train_dataloader(self) -> DataLoader:
+        if self.train_dataset is None:
+            raise ValueError("Trainer: training requires a train_dataset.")
+
+        train_dataset = self.train_dataset
+        if is_datasets_available() and isinstance(train_dataset, datasets.Dataset):
+            self.pair_info_df = train_dataset.to_pandas()[['feature_idx', 'pair_idx']].set_index('feature_idx')
+            train_dataset = train_dataset.remove_columns(['overflow_to_sample_mapping', 'local_feature_idx', 'source_idx', 'example_idx', 'pair_idx', 'source_example_idx'])
+
+        if isinstance(train_dataset, torch.utils.data.IterableDataset):
+            if self.args.world_size > 1:
+                train_dataset = IterableDatasetShard(
+                    train_dataset,
+                    batch_size=self.args.train_batch_size,
+                    drop_last=self.args.dataloader_drop_last,
+                    num_processes=self.args.world_size,
+                    process_index=self.args.process_index,
+                )
+            return DataLoader(
+                train_dataset,
+                batch_size=self.args.per_device_train_batch_size,
+                collate_fn=self.data_collator,
+                num_workers=self.args.dataloader_num_workers,
+                pin_memory=self.args.dataloader_pin_memory,
+            )
+
+        train_sampler = self._get_train_sampler()
+
+        return DataLoader(
+            train_dataset,
+            batch_size=self.args.train_batch_size,
+            sampler=train_sampler,
+            collate_fn=self.data_collator,
+            drop_last=self.args.dataloader_drop_last,
+            num_workers=self.args.dataloader_num_workers,
+            pin_memory=self.args.dataloader_pin_memory,
+        )
     
     def compute_loss(self, model, inputs, return_outputs=False):
-        """
-        How the loss is computed by Trainer. By default, all models return the loss in the first element.
-        Subclass and override for custom behavior.
-        """
+        
         if self.label_smoother is not None and "labels" in inputs:
             labels = inputs.pop("labels")
         else:
@@ -134,10 +147,6 @@ class CustomTrainer(Trainer):
 
             contrastive_loss_overall = 0
             for layer_idx in self.contrastive_loss_layers:
-
-                # embed_a = outputs["hidden_states"][layer_idx]  # [bs, seq_len, embed_size]
-                # embed_b = outputs["hidden_states"][layer_idx]  # [bs, seq_len, embed_size]
-                # outputs["hidden_states"] = [torch.rand(outputs["start_logits"].shape[0], 384, 768, device=loss.device)]*13
                 if self.agg_for_contrastive == 'mean':
                     embed_a = torch.mean(outputs["hidden_states"][layer_idx], dim=1) # [bs, embed_size]
                     embed_b = torch.mean(outputs_pair["hidden_states"][layer_idx], dim=1) # [bs, embed_size]
@@ -177,129 +186,10 @@ class CustomTrainer(Trainer):
             contrastive_loss = contrastive_loss_overall / len(self.contrastive_loss_layers)
             wandb.log({'train/qa_loss': loss}, commit=False)
             wandb.log({'train/contrastive_loss': contrastive_loss}, commit=False)
-
-            # contrastive_loss_overall_qn = 0
-            # contrastive_loss_overall_con = 0
-            # for layer_idx in self.contrastive_loss_layers:
-
-            #     embed_a = outputs["hidden_states"][layer_idx]  # [bs, seq_len, embed_size]
-            #     filter_a_qn = torch.unsqueeze((inputs['token_type_ids']==0).long(), dim=2) # [bs, seq_len, 1]
-            #     embed_a_qn = embed_a * filter_a_qn
-            #     embed_a_con = embed_a * (1-filter_a_qn)
-
-            #     embed_b = outputs_pair["hidden_states"][layer_idx]  # [bs, seq_len, embed_size]
-            #     filter_b_qn = torch.unsqueeze((inputs_pair['token_type_ids']==0).long(), dim=2) # [bs, seq_len, 1]
-            #     embed_b_qn = embed_b * filter_b_qn
-            #     embed_b_con = embed_b * (1-filter_b_qn)
-
-            #     if self.agg_for_contrastive == 'mean':
-            #         embed_a_qn = torch.sum(embed_a_qn, dim=1) / torch.sum(filter_a_qn, dim=1)# [bs, embed_size]
-            #         embed_a_con = torch.sum(embed_a_con, dim=1) / torch.sum(1-filter_a_qn, dim=1)# [bs, embed_size]
-            #         embed_b_qn = torch.sum(embed_b_qn, dim=1) / torch.sum(filter_b_qn, dim=1)# [bs, embed_size]
-            #         embed_b_con = torch.sum(embed_b_con, dim=1) / torch.sum(1-filter_b_qn, dim=1)# [bs, embed_size]
-            #     elif self.agg_for_contrastive == 'max':
-            #         embed_a_qn, _ = torch.max(embed_a_qn, dim=1) # [bs, embed_size]
-            #         embed_a_con, _ = torch.max(embed_a_con, dim=1) # [bs, embed_size]
-            #         embed_b_qn, _ = torch.max(embed_b_qn, dim=1) # [bs, embed_size]
-            #         embed_b_con, _ = torch.max(embed_b_con, dim=1) # [bs, embed_size]
-            #     elif self.agg_for_contrastive == 'cls_sep':
-            #         pass
-            #     else:
-            #         raise ValueError()
-                
-            #     if normalize_embedding:
-            #         embed_a_qn = F.normalize(embed_a_qn, p=2, dim=1)
-            #         embed_a_con = F.normalize(embed_a_con, p=2, dim=1)
-
-            #         embed_b_qn = F.normalize(embed_b_qn, p=2, dim=1)
-            #         embed_b_con = F.normalize(embed_b_con, p=2, dim=1)
-
-            #     if self.temperature_for_contrastive < 0:
-            #         logit_scale_qn = self.model.logit_scale_qn.exp()
-            #         logits_qn = torch.mm(embed_a_qn, embed_b_qn.t()) * logit_scale_qn
-
-            #         logit_scale_con = self.model.logit_scale_con.exp()
-            #         logits_con = torch.mm(embed_a_con, embed_b_con.t()) * logit_scale_con
-            #     else:
-            #         logits_qn = torch.mm(embed_a_qn, embed_b_qn.t()) * self.temperature_for_contrastive
-
-            #         logits_con = torch.mm(embed_a_con, embed_b_con.t()) * self.temperature_for_contrastive
-
-            #     if contrastive_loss_method == 'clip':
-            #         labels = torch.arange(logits_qn.shape[0], device=logits_qn.device)
-
-            #         a_loss_qn = self.cross_entropy_loss(logits_qn, labels)
-            #         b_loss_qn = self.cross_entropy_loss(logits_qn.t(), labels)
-            #         layer_contrastive_loss_qn = (a_loss_qn + b_loss_qn) / 2
-
-            #         a_loss_con = self.cross_entropy_loss(logits_con, labels)
-            #         b_loss_con = self.cross_entropy_loss(logits_con.t(), labels)
-            #         layer_contrastive_loss_con = (a_loss_con + b_loss_con) / 2
-            #     else:
-            #         raise ValueError()
-
-            #     contrastive_loss_overall_qn += layer_contrastive_loss_qn
-            #     contrastive_loss_overall_con += layer_contrastive_loss_con
-            
-            # contrastive_loss_qn = contrastive_loss_overall_qn / len(self.contrastive_loss_layers)
-            # contrastive_loss_con = contrastive_loss_overall_con / len(self.contrastive_loss_layers)
-            # contrastive_loss = (contrastive_loss_qn + contrastive_loss_con) / 2
-            # wandb.log({'train/qa_loss': loss}, commit=False)
-            # wandb.log({'train/qa_loss_pair': loss_pair}, commit=False)
-            # wandb.log({'train/contrastive_loss_qn': contrastive_loss_qn}, commit=False)
-            # wandb.log({'train/contrastive_loss_con': contrastive_loss_con}, commit=False)
-            # wandb.log({'train/contrastive_loss': contrastive_loss}, commit=False)
-
-
             if self.state.global_step < self.max_steps_for_contrastive:
                 loss = loss + self.wt_contrastive_loss*contrastive_loss #+ loss_pair
 
         return (loss, outputs) if return_outputs else loss
-
-    def get_train_dataloader(self) -> DataLoader:
-        """
-        Returns the training [`~torch.utils.data.DataLoader`].
-        Will use no sampler if `self.train_dataset` does not implement `__len__`, a random sampler (adapted to
-        distributed training if necessary) otherwise.
-        Subclass and override this method if you want to inject some custom behavior.
-        """
-        if self.train_dataset is None:
-            raise ValueError("Trainer: training requires a train_dataset.")
-
-        train_dataset = self.train_dataset
-        if is_datasets_available() and isinstance(train_dataset, datasets.Dataset):
-            #train_dataset = self._remove_unused_columns(train_dataset, description="training")
-            self.pair_info_df = train_dataset.to_pandas()[['feature_idx', 'pair_idx']].set_index('feature_idx')
-            train_dataset = train_dataset.remove_columns(['overflow_to_sample_mapping', 'local_feature_idx', 'source_idx', 'example_idx', 'pair_idx', 'source_example_idx'])
-
-        if isinstance(train_dataset, torch.utils.data.IterableDataset):
-            if self.args.world_size > 1:
-                train_dataset = IterableDatasetShard(
-                    train_dataset,
-                    batch_size=self.args.train_batch_size,
-                    drop_last=self.args.dataloader_drop_last,
-                    num_processes=self.args.world_size,
-                    process_index=self.args.process_index,
-                )
-            return DataLoader(
-                train_dataset,
-                batch_size=self.args.per_device_train_batch_size,
-                collate_fn=self.data_collator,
-                num_workers=self.args.dataloader_num_workers,
-                pin_memory=self.args.dataloader_pin_memory,
-            )
-
-        train_sampler = self._get_train_sampler()
-
-        return DataLoader(
-            train_dataset,
-            batch_size=self.args.train_batch_size,
-            sampler=train_sampler,
-            collate_fn=self.data_collator,
-            drop_last=self.args.dataloader_drop_last,
-            num_workers=self.args.dataloader_num_workers,
-            pin_memory=self.args.dataloader_pin_memory,
-        )
 
 
 

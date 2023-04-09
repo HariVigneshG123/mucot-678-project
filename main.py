@@ -1,22 +1,10 @@
 import argparse
-from operator import contains
-
-import pandas as pd
 import wandb
-
-from transformers import EarlyStoppingCallback, default_data_collator
-from transformers import TrainingArguments, Trainer
-
-from datasets_local import load_dataset, postprocess_qa_predictions, add_pair_idx_column
+from transformers import default_data_collator, TrainingArguments
+from datasets_local import load_dataset, add_pair_idx_column
 from engine import CustomTrainer, EvaluationCallback, create_tokenizer, create_model, evaluate_model
-from utils.metrics import compute_f1_score, computer_jaccard_score
 
 def str2bool(v):
-    """
-    src: https://stackoverflow.com/questions/15008758/parsing-boolean-values-with-argparse
-    Converts string to bool type; enables command line 
-    arguments in the format of '--arg1 true --arg2 false'
-    """
     if isinstance(v, bool):
         return v
     if v.lower() in ('yes', 'true', 't', 'y', '1'):
@@ -133,8 +121,6 @@ def main(args):
         data_collator=default_data_collator,
         tokenizer=tokenizer,
         callbacks = [
-#            EarlyStoppingCallback(early_stopping_patience = 5), 
-#            EvaluationCallback(dataset=dataset_train_4eval, dataset_tokenized=dataset_train_tokenized_4eval, prefix='train'),
             EvaluationCallback(dataset=dataset_val_4eval, dataset_tokenized=dataset_val_tokenized_4eval, prefix='val'),
             EvaluationCallback(dataset=dataset_test_4eval, dataset_tokenized=dataset_test_tokenized_4eval, prefix='test')
         ],
@@ -146,17 +132,11 @@ def main(args):
     )
         
     if not args.eval:
-        # wandb.summary.best - [val, test] split metric based on [corresponding best scores] in the [corresponding] split
         trainer.train()
-
-    # Final Evaluation 
-    # wandb.summary.final - [train, val, test] split metrics based on [overall eval loss] on [val] split
     wandb.summary['final/step'] = int(trainer.state.best_model_checkpoint.rsplit('-', 1)[-1])
-    #evaluate_model(model, tokenizer, dataset_train_4eval, dataset_train_tokenized_4eval, prefix='train', run_name=run_name)
     evaluate_model(model, tokenizer, dataset_val_4eval, dataset_val_tokenized_4eval, prefix='val', run_name=run_name)
     evaluate_model(model, tokenizer, dataset_test_4eval, dataset_test_tokenized_4eval, prefix='test', run_name=run_name)
 
-    # wandb.summary.result - [test] split metric based on [corresponding best scores] in the [val] split
     groups = wandb.summary['best/val/jaccard'].keys() # overall, hi, ta
     jaccard_result = {}
     f1_result = {}
