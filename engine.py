@@ -17,7 +17,7 @@ if is_apex_available():
 if is_datasets_available():
     import datasets
 
-from datasets_local import postprocess_qa_predictions
+from datasets_local import quesAns_pred_postProcess
 from utils.metrics import compute_f1_score, computer_jaccard_score
 
 
@@ -224,7 +224,7 @@ class EvaluationCallback(TrainerCallback):
         predictions_raw = eval_trainer.predict(self.dataset_tokenized)
         model.config.output_hidden_states = True # To handle out of memory: undo for training
 
-        predictions = postprocess_qa_predictions(self.dataset, self.dataset_tokenized, 
+        predictions = quesAns_pred_postProcess(self.dataset, self.dataset_tokenized, 
             predictions_raw.predictions, tokenizer)
         actuals = [{"id": ex["id"], "language": ex["language"], "answer": ex["answers"]['text'][0]} for ex in self.dataset]
         
@@ -289,7 +289,7 @@ def evaluate_model(model, tokenizer, dataset, dataset_tokenized, prefix, run_nam
     eval_trainer = Trainer(model)
 
     predictions_raw = eval_trainer.predict(dataset_tokenized)
-    predictions = postprocess_qa_predictions(dataset, dataset_tokenized, 
+    predictions = quesAns_pred_postProcess(dataset, dataset_tokenized, 
         predictions_raw.predictions, tokenizer)
     actuals = [{"id": ex["id"], "language": ex["language"], "answer": ex["answers"]['text'][0]} for ex in dataset]
     

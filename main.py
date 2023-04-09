@@ -1,7 +1,7 @@
 import argparse
 import wandb
 from transformers import default_data_collator, TrainingArguments
-from datasets_local import load_dataset, add_pair_idx_column
+from datasets_local import dataset_importAndProcess, add_pair_idx_column
 from engine import CustomTrainer, EvaluationCallback, create_tokenizer, create_model, evaluate_model
 
 def str2bool(v):
@@ -66,17 +66,17 @@ def get_arg_parser():
 def main(args):
 
     tokenizer = create_tokenizer(args)
-    dataset_train, dataset_train_tokenized = load_dataset(args=args, split='train', mode='train', tokenizer=tokenizer)
-    dataset_val, dataset_val_tokenized = load_dataset(args=args, split='val', mode='train', tokenizer=tokenizer)
+    dataset_train, dataset_train_tokenized = dataset_importAndProcess(args=args, split='train', mode='train', tokenizer=tokenizer)
+    dataset_val, dataset_val_tokenized = dataset_importAndProcess(args=args, split='val', mode='train', tokenizer=tokenizer)
     model = create_model(args)
 
     # for contrastive training
     dataset_train_tokenized = add_pair_idx_column(dataset_train, dataset_train_tokenized)
 
     # for evaluation callback
-    #dataset_train_4eval, dataset_train_tokenized_4eval = load_dataset(args=args, split='train', mode='eval', tokenizer=tokenizer)
-    dataset_val_4eval, dataset_val_tokenized_4eval = load_dataset(args=args, split='val', mode='eval', tokenizer=tokenizer)
-    dataset_test_4eval, dataset_test_tokenized_4eval = load_dataset(args=args, split='test', mode='eval', tokenizer=tokenizer)
+    #dataset_train_4eval, dataset_train_tokenized_4eval = dataset_importAndProcess(args=args, split='train', mode='eval', tokenizer=tokenizer)
+    dataset_val_4eval, dataset_val_tokenized_4eval = dataset_importAndProcess(args=args, split='val', mode='eval', tokenizer=tokenizer)
+    dataset_test_4eval, dataset_test_tokenized_4eval = dataset_importAndProcess(args=args, split='test', mode='eval', tokenizer=tokenizer)
     
     if args.debug:
         wandb.init(project='mlqa', mode='disabled')
